@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>ComputerUseDoctor</string>
+<key>CFBundleIdentifier</key><string>org.computer-use-doctor.preview.v9</string>
+<key>CFBundleName</key><string>Computer Use Doctor V9 Preview</string>
+<key>CFBundleDisplayName</key><string>Computer Use Doctor V9 Preview</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>9.0.0</string>
+<key>CFBundleVersion</key><string>900</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>Computer Use Doctor 需要與已安裝的 Codex Computer Use 服務通信，以建立本 App 測試面板的介面讀取與操作驗證連接；不自動操作其他 App 或傳送資料。</string>
+</dict></plist>

@@ -1,0 +1,13 @@
+dist/
+.build-cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+auth.json
+config.toml
+*report.txt
+receipts/
+events/
+*.log
