@@ -20,6 +20,11 @@ struct RuntimeVerification: Codable {
     let state: String; let phase: String; let detail: String; let route: String
     let generated_at: String; let nonce: String; let clicks: Int; let screenshot: String
 }
+struct EnvironmentReadiness: Codable {
+    let home: String; let home_source: String
+    let config_ready: Bool; let runtime_ready: Bool
+    let rows: [DiagnosticRow]; let boundary: String
+}
 struct Diagnostic: Codable {
     let version: String
     let generated_at: String
@@ -95,7 +100,21 @@ enum Section: String, CaseIterable, Identifiable {
 }
 
 enum Backend {
-    static func run(_ action: String, extra: [String] = [], input: String? = nil) throws -> Data {
+    static func developerPythonPresent(_ directory:URL) -> Bool {
+        FileManager.default.isExecutableFile(atPath:directory.appendingPathComponent("usr/bin/python3").path)
+    }
+    static func checkPythonWithoutInstaller() throws {
+        let probe=Process();let output=Pipe()
+        probe.executableURL=URL(fileURLWithPath:"/usr/bin/xcode-select");probe.arguments=["-p"]
+        probe.standardOutput=output;probe.standardError=FileHandle.nullDevice
+        try probe.run()
+        let data=output.fileHandleForReading.readDataToEndOfFile();probe.waitUntilExit()
+        let selected=String(decoding:data,as:UTF8.self).trimmingCharacters(in:.whitespacesAndNewlines)
+        guard probe.terminationStatus == 0, selected.hasPrefix("/"), developerPythonPresent(URL(fileURLWithPath:selected)) else {
+            throw NSError(domain:"Doctor",code:31,userInfo:[NSLocalizedDescriptionKey:"未找到可用的系統 Python 執行環境；請由本人準備免費的 Apple Command Line Tools。未啟動 Python 安裝提示、不自動下載，也不需要付費 Apple Developer 帳號。"])
+        }
+    }
+    static func run(_ action: String, extra: [String] = [], input: String? = nil, configHome: String? = nil) throws -> Data {
         if let input = input, input.utf8.count > 64000 {
             throw NSError(domain: "V9", code: 10, userInfo: [NSLocalizedDescriptionKey: "記錄超過64KB，請按相關事件分段；未默默截斷。"])
         }
@@ -106,9 +125,11 @@ enum Backend {
         guard FileManager.default.fileExists(atPath: script.path), FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
             throw NSError(domain: "V3", code: 2, userInfo: [NSLocalizedDescriptionKey: "需要本機 Python 3，或 App 資源不完整。未自動下載／安裝。"])
         }
+        try checkPythonWithoutInstaller()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         var arguments = [script.path, action] + extra
+        if let configHome=configHome { arguments += ["--home",configHome] }
         // Fixture override is excluded from production builds.
         #if TESTING
         if CommandLine.arguments.contains("--fixture") {
@@ -128,7 +149,7 @@ enum Backend {
         process.standardOutput = out; process.standardError = error; process.standardInput = stdin
         try process.run()
         // Bound reads and the atomic metadata journal; never kill a cache repair/restore.
-        let cancellable = ["diagnose", "classify", "history", "auto-decision", "event-history", "record-event"].contains(action)
+        let cancellable = ["preflight", "diagnose", "classify", "history", "auto-decision", "event-history", "record-event"].contains(action)
         let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
         if cancellable { DispatchQueue.global().asyncAfter(deadline: .now() + 45, execute: watchdog) }
         if let input = input { stdin.fileHandleForWriting.write(input.data(using: .utf8) ?? Data()) }
@@ -180,6 +201,53 @@ enum Backend {
     @Published var installedVersionAvailable=false
     @Published var accessibilityAllowed=false
     @Published var screenCaptureAllowed=false
+    @Published var readiness: EnvironmentReadiness?
+    @Published var configPathInput=""
+    @Published private(set) var configHome: String? = UserDefaults.standard.string(forKey:"doctorConfigHome")
+    var configLocationText:String {
+        if let readiness=readiness { return "正在使用：\(readiness.home)（\(readiness.home_source)）" }
+        if let configHome=configHome { return "已指定：\(configHome)；尚待核對，不退回其他設定。" }
+        return "尚未取得有效環境。依 CODEX_HOME 或預設 .codex；不搜尋其他帳號。"
+    }
+    func chooseConfigFolder() {
+        guard !busy else { return }
+        let panel=NSOpenPanel()
+        panel.canChooseDirectories=true;panel.canChooseFiles=false;panel.allowsMultipleSelection=false
+        panel.canCreateDirectories=false;panel.allowedContentTypes=[.folder];panel.prompt="選擇資料夾"
+        panel.message="選擇你自己的 Codex 設定資料夾（內含 config.toml）。只改 Doctor 的選擇，不複製登入資料或修改 Codex 設定。"
+        dialogOpen=true
+        panel.begin { response in
+            Task { @MainActor in
+                self.dialogOpen=false
+                guard response == .OK, let url=panel.url else { return }
+                self.configHome=url.resolvingSymlinksInPath().path
+                UserDefaults.standard.set(self.configHome,forKey:"doctorConfigHome")
+                self.resetEnvironment()
+            }
+        }
+    }
+    func applyConfigPath() {
+        guard !busy, !dialogOpen else { return }
+        let candidate=configPathInput.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !candidate.isEmpty else { failure="設定路徑不可留空；未切換設定。";return }
+        configHome=candidate;UserDefaults.standard.set(candidate,forKey:"doctorConfigHome")
+        resetEnvironment()
+    }
+    func useDefaultConfigFolder() {
+        guard !busy else { return }
+        configHome=nil;UserDefaults.standard.removeObject(forKey:"doctorConfigHome")
+        resetEnvironment()
+    }
+    func resetEnvironment() {
+        timer?.invalidate();timer=nil;started=false
+        autoRepair=false;approvedSources=[:];previousPlan=nil;attemptedPlans.removeAll()
+        readiness=nil;diagnostic=nil;diagnosticIsCurrent=false;transactions=[];events=[]
+        runtimeVerification=nil;diagnosticReport="";mutationReport="";eventWarning=nil
+        testActive=false;testNonce="尚未啟動";testClicks=0;testResult="待測";testExpression="待測"
+        lastAttempt=nil;lastCheckAttempt=nil;lastFailure=nil;lastCheck="尚未檢查"
+        automationStatus="設定目錄已切換；舊診斷與本次自動修復授權已清除，重新檢查後才可修復。"
+        startMonitoring()
+    }
     func readNativePermissions() {
         #if !TESTING
         accessibilityAllowed=AXIsProcessTrusted()
@@ -203,7 +271,7 @@ enum Backend {
         guard let from=Bundle(url:current), let to=Bundle(url:installed),
               from.bundleIdentifier == "org.computer-use-doctor.preview.v9", to.bundleIdentifier==from.bundleIdentifier,
               from.object(forInfoDictionaryKey:"CFBundleVersion") as? String == to.object(forInfoDictionaryKey:"CFBundleVersion") as? String else { return false }
-        for component in ["Contents/MacOS/ComputerUseDoctor","Contents/Resources/backend.py","Contents/Resources/runtime_client.py","Contents/Resources/install_paths.py","Contents/Resources/repair_core.py"] {
+        for component in ["Contents/MacOS/ComputerUseDoctor","Contents/Resources/backend.py","Contents/Resources/runtime_client.py","Contents/Resources/install_paths.py","Contents/Resources/repair_core.py","Contents/Resources/preflight.py"] {
             guard let a=try? Data(contentsOf:current.appendingPathComponent(component)),
                   let b=try? Data(contentsOf:installed.appendingPathComponent(component)),
                   SHA256.hash(data:a)==SHA256.hash(data:b) else { return false }
@@ -220,7 +288,8 @@ enum Backend {
             }) {
                 earlier.activate(options:[]);NSApplication.shared.terminate(nil);return false
             }
-            instanceStatus="目前執行：本機 Applications 固定版本（V9.0.0）";return true
+            let version=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "未確認"
+            instanceStatus="目前執行：本機 Applications 固定版本（\(version)）";return true
         }
         installedVersionAvailable=installedCopyMatches(current,target)
         instanceStatus="目前執行：收納／其他位置副本，不登記此位置。"
@@ -265,7 +334,8 @@ enum Backend {
     private var testTerms=[Int]()
     private var testAdding=false
     @Published var testActive=false
-    var runtimeTitle: String { runtimeVerification?.state == "passed" ? "本次操作通過" : runtimeVerification?.state == "blocked" ? "需要系統允許" : runtimeVerification == nil ? "尚未實測" : "本次實測失敗" }
+    var testStateText:String { "實測批次：\(testNonce)\n實測算式：\(testExpression)\n實測結果：\(testResult)\n實測點擊：\(testClicks)" }
+    var runtimeTitle: String { runtimeVerification?.state == "passed" ? "本次操作通過" : runtimeVerification?.state == "blocked" ? "實測尚未就緒" : runtimeVerification == nil ? "尚未實測" : "本次實測失敗" }
     func testPress(_ label:String) {
         guard testActive else { return }
         testClicks += 1
@@ -315,6 +385,7 @@ enum Backend {
         object["events"]=encoded(events); object["event_log_warning"]=eventWarning
         object["transaction_history"]=encoded(transactions)
         object["startup_enabled"]=startupEnabled;object["startup_status"]=startupStatus
+        object["selected_environment"]=readiness.flatMap { encoded($0) }
         guard let data=try? JSONSerialization.data(withJSONObject:object,options:[.prettyPrinted,.sortedKeys]) else { return "報告無法組成；未宣稱成功。" }
         return String(decoding:data,as:UTF8.self)
     }
@@ -344,13 +415,16 @@ enum Backend {
     #endif
     func startMonitoring() {
         guard !started else { return }; started = true
-        guard prepareInstalledInstance() else { return }
+        let installed=prepareInstalledInstance()
         readNativePermissions()
-        configureStartupOnFirstLaunch()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.monitorTick() }
-        }
-        loadEvents(then: { self.monitorTick() })
+        execute("preflight",extra:["--app-path",Bundle.main.bundleURL.path],then:{ [self] in
+            guard installed, self.readiness?.config_ready == true else { return }
+            self.configureStartupOnFirstLaunch()
+            self.timer = Timer.scheduledTimer(withTimeInterval:60,repeats:true) { [weak self] _ in
+                Task { @MainActor in self?.monitorTick() }
+            }
+            self.loadEvents(then:{self.monitorTick()})
+        }) { data in self.readiness=try JSONDecoder().decode(EnvironmentReadiness.self,from:data) }
     }
     func configureStartupOnFirstLaunch() {
         #if !TESTING
@@ -418,10 +492,11 @@ enum Backend {
         busy = true; failure = nil; status = "處理中，請保留 App 開啟…"
         mutating = ["repair", "restore"].contains(action)
         if mutating { DoctorDelegate.mutationInProgress = true }
+        let selectedHome=configHome
         Task {
             var outcome="returned", eventCode="returned"
             do {
-                let data = try await Task.detached(priority: .userInitiated) { try Backend.run(action, extra: extra, input: input) }.value
+                let data = try await Task.detached(priority: .userInitiated) { try Backend.run(action, extra: extra, input: input,configHome:selectedHome) }.value
                 try finish(data)
                 if action == "diagnose" && !self.blockedTransactions.isEmpty { eventCode="transaction_blocked" }
                 if action == "auto-decision", let object=try? JSONSerialization.jsonObject(with:data) as? [String:Any] {
@@ -430,9 +505,10 @@ enum Backend {
                 status = "本次操作已返回；請查看各項證據層次"
             } catch {
                 failure = error.localizedDescription; status = "未完成，未宣稱通過"
+                if action == "preflight" { readiness=nil;diagnosticIsCurrent=false;previousPlan=nil;clearChecks=0 }
                 if action == "runtime-verify" {
                     self.runtimeVerification=RuntimeVerification(state:"failed",phase:"bridge",detail:error.localizedDescription,
-                        route:"Codex App Server → computer-use",generated_at:ISO8601DateFormatter().string(from:Date()),
+                        route:"Codex App Server → node_repl + @oai/sky",generated_at:ISO8601DateFormatter().string(from:Date()),
                         nonce:self.testNonce,clicks:self.testClicks,screenshot:"not_tested")
                 }
                 outcome="failed"; eventCode="failed"
@@ -450,11 +526,11 @@ enum Backend {
             let attempt=OperationAttempt(action:action,outcome:outcome,time:ISO8601DateFormatter().string(from:Date()),error:outcome == "failed" ? failure : nil)
             if action != "event-history" {
                 lastAttempt=attempt
-                if action == "diagnose" { lastCheckAttempt=attempt }
+                if action == "diagnose" || (action == "preflight" && outcome == "failed") { lastCheckAttempt=attempt }
                 if outcome == "failed" { lastFailure=attempt }
-                if action != "runtime-verify" { do {
+                if !["runtime-verify","preflight"].contains(action) { do {
                     let request=try JSONSerialization.data(withJSONObject:["action":action,"code":eventCode])
-                    let data=try await Task.detached { try Backend.run("record-event",input:String(decoding:request,as:UTF8.self)) }.value
+                    let data=try await Task.detached { try Backend.run("record-event",input:String(decoding:request,as:UTF8.self),configHome:selectedHome) }.value
                     struct Response: Decodable { let events:[EventRow] }
                     self.events=try JSONDecoder().decode(Response.self,from:data).events
                     self.eventWarning=nil
@@ -466,8 +542,32 @@ enum Backend {
         }
     }
     func check(automatic: Bool = false) {
-        if !automatic { runtimeVerification=nil }
-        execute("diagnose", then: { if automatic { self.evaluateAutomation() } else if self.failure == nil { self.verifyRuntime() } }) { data in
+        guard !busy else { return }
+        if !automatic {
+            runtimeVerification=nil;testActive=false;testNonce="尚未啟動";testClicks=0;testResult="待測";testExpression="待測"
+        }
+        execute("preflight",extra:["--app-path",Bundle.main.bundleURL.path],then:{
+            guard self.failure == nil, self.readiness?.config_ready == true else {
+                self.diagnosticIsCurrent=false;self.previousPlan=nil;self.clearChecks=0
+                self.status="設定環境未就緒；請查看使用準備或選擇正確資料夾，未改另一份設定。"
+                if self.failure == nil { self.failure="設定檔未就緒，未使用先前報告修復；請查看使用準備提示。" }
+                let attempt=OperationAttempt(action:"preflight",outcome:"failed",time:ISO8601DateFormatter().string(from:Date()),error:self.failure)
+                self.lastCheckAttempt=attempt;self.lastFailure=attempt
+                return
+            }
+            self.runCheck(automatic:automatic)
+        }) { data in self.readiness=try JSONDecoder().decode(EnvironmentReadiness.self,from:data) }
+    }
+    func runCheck(automatic:Bool) {
+        execute("diagnose", then: {
+            if automatic { self.evaluateAutomation() }
+            else if self.failure == nil {
+                if self.readiness?.runtime_ready == true { self.verifyRuntime() }
+                else {
+                    self.runtimeVerification=RuntimeVerification(state:"blocked",phase:"preflight",detail:"使用準備尚有缺件；配置檢查已完成，但未啟動操作工具。請處理下列提示後重新檢查。",route:"Codex App Server → node_repl + @oai/sky",generated_at:ISO8601DateFormatter().string(from:Date()),nonce:"not-started",clicks:0,screenshot:"not_tested")
+                }
+            }
+        }) { data in
             self.diagnostic = try JSONDecoder().decode(Diagnostic.self, from: data)
             self.diagnosticIsCurrent=true
             self.rawReport = String(decoding: data, as: UTF8.self)
@@ -650,6 +750,33 @@ struct ContentView: View {
                     Text("下方是先前報告，本次檢查未成功；已禁止據此修復。").foregroundStyle(.orange)
                 }
                 VStack(alignment: .leading, spacing: 6) {
+                    Text("使用準備與設定位置").font(.headline)
+                    Text(model.configLocationText)
+                        .font(.caption).textSelection(.enabled)
+                        .accessibilityElement(children:.ignore).accessibilityLabel(model.configLocationText)
+                        .accessibilityIdentifier("doctor-config-location").id(model.configLocationText)
+                    HStack {
+                        Button("選擇設定資料夾") { model.chooseConfigFolder() }.disabled(model.busy)
+                        if model.configHome != nil { Button("使用環境／預設位置") { model.useDefaultConfigFolder() }.disabled(model.busy) }
+                    }
+                    DisclosureGroup("或直接指定設定路徑") {
+                        HStack {
+                            TextField("自己的 Codex 設定資料夾絕對路徑",text:$model.configPathInput)
+                            Button("使用此路徑") { model.applyConfigPath() }.disabled(model.busy)
+                        }
+                    }
+                    if let readiness=model.readiness, !readiness.runtime_ready {
+                        DisclosureGroup("實測尚未就緒：查看缺件與處理方法") {
+                            ScrollView {
+                                VStack(alignment:.leading,spacing:6) {
+                                    ForEach(readiness.rows.filter { $0.state != "checked" }) { row in
+                                        Text(row.name+"："+row.detail).font(.caption).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
+                                    }
+                                }
+                            }.frame(maxHeight:160)
+                        }
+                    }
+                    Text("缺件不自動安裝。自動檢查只讀；人工實測可能初始化既有工具服務，請只使用你信任的設定。").font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Toggle("自動檢查（60秒）", isOn: $model.autoCheck)
                         Toggle("自動修復已確認問題", isOn: Binding(get: { model.autoRepair }, set: { model.setAutoRepair($0) })).disabled(model.busy)
@@ -673,10 +800,10 @@ struct ContentView: View {
                         ForEach(["清除","1","加號","等號"],id:\.self) { key in
                             Button("實測：\(key)") { model.testPress(key) }.disabled(!model.testActive)
                         }
-                        Text("實測結果：\(model.testResult)")
                     }
-                    Text("實測批次：\(model.testNonce)").font(.caption.monospaced())
-                    Text("實測算式：\(model.testExpression)　實測點擊：\(model.testClicks)").font(.caption)
+                    Text(model.testStateText).font(.caption.monospaced())
+                        .accessibilityElement(children:.ignore).accessibilityLabel(model.testStateText)
+                        .accessibilityIdentifier("doctor-test-state").id(model.testStateText)
                 }.padding(10).background(.quaternary,in:RoundedRectangle(cornerRadius:10))
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {

@@ -9,6 +9,7 @@ xcrun swiftc -parse-as-library -O -target arm64-apple-macos14.0 \
   "$project_dir/Sources/main.swift" -o "$app_dir/Contents/MacOS/ComputerUseDoctor"
 cp "$project_dir/Resources/backend.py" "$project_dir/Resources/repair_core.py" "$project_dir/Resources/runtime_client.py" "$app_dir/Contents/Resources/"
 cp "$project_dir/Resources/install_paths.py" "$app_dir/Contents/Resources/"
+cp "$project_dir/Resources/preflight.py" "$app_dir/Contents/Resources/"
 rsync -a --delete --exclude='.DS_Store' --exclude='__pycache__' --exclude='*.pyc' "$project_dir/Resources/vendor/" "$app_dir/Contents/Resources/vendor/"
 cp "$project_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$project_dir/LICENSE" "$app_dir/Contents/Resources/LICENSE.txt"

@@ -295,6 +295,8 @@ def diagnose(home, probe=True):
 
 def classify(text):
     checks = (
+        ('platform_incompatible', ('application is not supported on this mac', 'application is not supported on', 'incompatible architecture', '不支援這台 mac', '不支持此mac'),
+         'App 平台或架構相容性待核', '核對實際 App 路徑、系統要求、架構及編譯平台；這不是普通未簽署提示，不自動開啟、不改權限，也不以停用系統保護處理。'),
         ('website_policy', ('not permitted on', '網站權限', 'blocked by saved user'),
          '網站存取被限制', '核對發生錯誤的瀏覽器和目的地權限；不以改工具繞過拒絕。'),
         ('authorization_evidence', ('relayed authorization', '授權證據', '代轉授權', 'original task instructions'),
@@ -529,17 +531,23 @@ def record_event(home,request):
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['diagnose','classify','repair','history','restore','auto-decision','record-event','event-history','runtime-verify'])
+    parser.add_argument('action',choices=['preflight','diagnose','classify','repair','history','restore','auto-decision','record-event','event-history','runtime-verify'])
     parser.add_argument('--nonce',default='')
     parser.add_argument('--app-path',type=Path)
-    parser.add_argument('--home',type=Path,default=Path.home()/'.codex')
+    parser.add_argument('--home',type=Path)
     parser.add_argument('--no-probe',action='store_true')
     parser.add_argument('--plan',default='')
     parser.add_argument('--transaction',default='')
     parser.add_argument('--confirmed',action='store_true')
     args=parser.parse_args()
     try:
-        if args.action=='runtime-verify':
+        from install_paths import config_home
+        if args.action not in ('classify','auto-decision'):
+            args.home,home_source=config_home(args.home)
+        if args.action=='preflight':
+            from preflight import inspect_environment
+            result=inspect_environment(args.home,home_source,config_data,args.app_path)
+        elif args.action=='runtime-verify':
             from runtime_client import verify
             result=verify(args.home,args.nonce,args.app_path)
         elif args.action=='diagnose':result=diagnose(args.home,not args.no_probe)
