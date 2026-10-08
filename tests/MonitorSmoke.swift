@@ -12,6 +12,12 @@ import AppKit
     @MainActor static func main() async {
         do {
             let model=Model.shared
+            let missingPython=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+            guard !Backend.developerPythonPresent(missingPython) else { throw NSError(domain:"Test",code:31) }
+            try Backend.checkPythonWithoutInstaller()
+            model.readiness=EnvironmentReadiness(home:"/fixture/new-config",home_source:"explicit",config_ready:true,runtime_ready:false,rows:[],boundary:"fixture")
+            guard model.configLocationText.contains("/fixture/new-config") else { throw NSError(domain:"Test",code:30) }
+            model.readiness=nil
             model.check()
             try await settle(model)
             guard model.failure == nil, model.diagnostic?.repair_count == 1 else { throw NSError(domain:"Test",code:2) }
@@ -90,7 +96,7 @@ import AppKit
             try await settle(model)
             guard model.classification == nil else { throw NSError(domain:"Test",code:23) }
             model.check();try await settle(model)
-            guard model.runtimeVerification?.state == "failed", model.testActive == false else { throw NSError(domain:"Test",code:24) }
+            guard model.runtimeVerification?.state == "blocked", model.testActive == false, model.readiness?.config_ready == true else { throw NSError(domain:"Test",code:24) }
             model.testActive=true
             ["清除","1","加號","1","等號"].forEach { model.testPress($0) }
             guard model.testClicks == 5, model.testExpression == "1 + 1", model.testResult == "2" else { throw NSError(domain:"Test",code:25) }
@@ -102,7 +108,7 @@ import AppKit
                 try FileManager.default.createDirectory(at:bundle.appendingPathComponent("Contents/MacOS"),withIntermediateDirectories:true)
                 let plist:[String:Any]=["CFBundleIdentifier":"org.computer-use-doctor.preview.v9","CFBundleVersion":"801","CFBundleExecutable":"ComputerUseDoctor","CFBundlePackageType":"APPL"]
                 try PropertyListSerialization.data(fromPropertyList:plist,format:.xml,options:0).write(to:bundle.appendingPathComponent("Contents/Info.plist"))
-                for file in ["Contents/MacOS/ComputerUseDoctor","Contents/Resources/backend.py","Contents/Resources/runtime_client.py","Contents/Resources/install_paths.py","Contents/Resources/repair_core.py"] { try Data("same fixture".utf8).write(to:bundle.appendingPathComponent(file)) }
+                for file in ["Contents/MacOS/ComputerUseDoctor","Contents/Resources/backend.py","Contents/Resources/runtime_client.py","Contents/Resources/install_paths.py","Contents/Resources/repair_core.py","Contents/Resources/preflight.py"] { try Data("same fixture".utf8).write(to:bundle.appendingPathComponent(file)) }
             }
             guard model.installedCopyMatches(a,b) else { throw NSError(domain:"Test",code:27) }
             try Data("different".utf8).write(to:b.appendingPathComponent("Contents/Resources/backend.py"))

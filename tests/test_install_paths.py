@@ -38,5 +38,26 @@ class InstallPathTests(unittest.TestCase):
         with patch.object(p,'__file__',str(resources/'install_paths.py')),self.assertRaises(ValueError):p.own_app(app)
     def test_unknown_node_command_rejected(self):
         with self.assertRaises(ValueError):p.node_command('/tmp/unknown/node_repl')
+    def test_explicit_home_wins_over_environment(self):
+        chosen=self.root/'selected';chosen.mkdir()
+        result,source=p.config_home(chosen,{'CODEX_HOME':'/missing'},self.root)
+        self.assertEqual(result,chosen.resolve());self.assertIn('明確指定',source)
+    def test_environment_home_used(self):
+        chosen=self.root/'custom home';chosen.mkdir()
+        self.assertEqual(p.config_home(None,{'CODEX_HOME':str(chosen)},self.root)[0],chosen.resolve())
+    def test_default_only_when_override_absent(self):
+        default=self.root/'.codex';default.mkdir()
+        self.assertEqual(p.config_home(None,{},self.root),(default.resolve(),'預設位置'))
+    def test_invalid_override_never_falls_back(self):
+        (self.root/'.codex').mkdir()
+        for value in ('','relative','.','/missing-doctor-fixture',str(self.root)):
+            with self.subTest(value=value),self.assertRaises(ValueError):p.config_home(None,{'CODEX_HOME':value},self.root)
+    def test_file_not_config_directory(self):
+        f=self.root/'file';f.write_text('fixture')
+        with self.assertRaises(ValueError):p.config_home(f,{},self.root)
+    def test_custom_config_keeps_default_distribution_separate(self):
+        chosen=self.root/'custom config';chosen.mkdir()
+        cli=self.executable(self.root/'.codex/packages/standalone/current/bin/codex')
+        self.assertEqual(p.codex_cli(chosen,self.root),cli.resolve())
 
 if __name__=='__main__':unittest.main()

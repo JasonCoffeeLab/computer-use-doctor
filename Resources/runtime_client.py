@@ -10,6 +10,16 @@ PUBLIC_ENV={'BROWSER_USE_AVAILABLE_BACKENDS','BROWSER_USE_CODEX_APP_BUILD_FLAVOR
 
 class RuntimeErrorSafe(Exception):pass
 
+def stderr_hint(line):
+    lower=line.lower()
+    if 'invalid transport' in lower or 'error loading default config' in lower:
+        return '官方 CLI 未能載入本次臨時設定；未啟動操作。這不是要求你重新批准。'
+    if 'failed to initialize sqlite state runtime' in lower:
+        return '官方 CLI 的本機狀態資料庫未能初始化；未開始操作，請核對官方 App 與資料目錄。'
+    if lower.startswith('error:'):
+        return '官方 CLI 啟動返回錯誤；未保存原始錯誤中的配置或秘密。'
+    return None
+
 class Client:
     def __init__(self,home):
         body=b.config_data(home).get('mcp_servers',{}).get('node_repl',{})
@@ -27,6 +37,7 @@ class Client:
     def _start(self,command,args,environment,cwd):
         self.proc=subprocess.Popen([command]+args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment,cwd=str(cwd))
         self.messages=queue.Queue();self.counter=0
+        self.transport_hint=None;self.stderr_done=threading.Event()
         def read():
             try:
                 for line in self.proc.stdout:
@@ -34,7 +45,16 @@ class Client:
             except Exception:self.messages.put({'transport_invalid':True})
             finally:self.messages.put(None)
         threading.Thread(target=read,daemon=True).start()
-        threading.Thread(target=lambda:self.proc.stderr.read(),daemon=True).start()
+        def read_stderr():
+            try:
+                for line in iter(lambda:self.proc.stderr.readline(4096),''):
+                    hint=stderr_hint(line)
+                    if hint and self.transport_hint is None:self.transport_hint=hint
+            finally:self.stderr_done.set()
+        threading.Thread(target=read_stderr,daemon=True).start()
+    def transport_failure(self):
+        self.stderr_done.wait(timeout=0.2)
+        return RuntimeErrorSafe(self.transport_hint or '官方對接已中斷或返回格式無效；未取得本次有效结果。')
     def send(self,body):
         self.proc.stdin.write(json.dumps(body)+'\n');self.proc.stdin.flush()
     def request(self,method,params,timeout=20):
@@ -94,7 +114,8 @@ try {
    if(!state.text.includes('實測批次：'+nonce)) throw new Error('test_session_changed');
  }
  phase='read_result';
- var pass=/實測算式：1 \+ 1(?:\s|$)/.test(state.text) && /實測結果：2(?:\s|$)/.test(state.text) && /實測點擊：5(?:\s|$)/.test(state.text);
+ var batch=state.text.match(new RegExp('實測批次：'+nonce+'\\s+實測算式：(.*?)\\s+實測結果：([+-]?\\d+)\\s+實測點擊：(\\d+)(?=\\s|,|$)'));
+ var pass=Boolean(batch && batch[1].trim()==='1 + 1' && batch[2]==='2' && batch[3]==='5');
  nodeRepl.write(JSON.stringify({doctor_runtime:true,state:pass?'passed':'failed',phase,clicks,nonce}));
 } catch(e) {
  var reason=String(e.message||'');
@@ -168,7 +189,15 @@ class AppServerClient(NativeClient):
         command=codex_cli(home)
         environment={k:v for k,v in os.environ.items() if k in {'HOME','PATH','TMPDIR','LANG','LC_ALL','USER','LOGNAME','SHELL'}}
         environment['CODEX_HOME']=str(home)
-        self._start(str(command),['app-server','--stdio'],environment,'/private/tmp')
+        arguments=['app-server','--stdio']
+        if not require_native:
+            # Scope only this ephemeral process. Never rewrite user config or approval rules.
+            servers=b.config_data(home).get('mcp_servers',{})
+            for name in sorted(servers):
+                if not re.fullmatch(r'[A-Za-z0-9_-]+',name):
+                    raise RuntimeErrorSafe('MCP 名稱不支援已核對的臨時覆寫語法，未啟動多餘入口。')
+                if name!='node_repl':arguments+=['-c','mcp_servers.'+name+'.enabled=false']
+        self._start(str(command),arguments,environment,'/private/tmp')
         self.thread_id=None
     def request(self,method,params,timeout=20):
         self.counter+=1;identifier=self.counter
@@ -178,7 +207,7 @@ class AppServerClient(NativeClient):
         while True:
             try:item=self.messages.get(timeout=max(0,end-time.monotonic()))
             except queue.Empty:raise RuntimeErrorSafe('官方對接逾時，未繼續操作。')
-            if item is None or item.get('transport_invalid'):raise RuntimeErrorSafe('官方對接已中斷或返回格式無效。')
+            if item is None or item.get('transport_invalid'):raise self.transport_failure()
             if 'method' in item and 'id' in item:
                 self.send(dict(id=item['id'],error=dict(code=-32000,message='Doctor cannot auto-approve an unexpected host request')))
                 raise RuntimeErrorSafe('官方對接要求額外處理：'+str(item.get('method'))+'；未自動代批或擴大範圍。')
@@ -188,7 +217,7 @@ class AppServerClient(NativeClient):
                 raise RuntimeErrorSafe('官方對接返回 '+str(error.get('code'))+'：'+b.redact(error.get('message',''))[:300])
             return item.get('result')
     def initialize(self):
-        result=self.request('initialize',dict(clientInfo=dict(name='computer-use-doctor',title='Computer Use Doctor',version='9.0.0'),capabilities=dict(experimentalApi=True)))
+        result=self.request('initialize',dict(clientInfo=dict(name='computer-use-doctor',title='Computer Use Doctor',version='9.0.1'),capabilities=dict(experimentalApi=True)))
         if not isinstance(result,dict):raise RuntimeErrorSafe('官方對接初始化未確認。')
         self.send(dict(method='initialized'))
         context=self.request('thread/start',dict(ephemeral=True,cwd='/private/tmp'),timeout=30)

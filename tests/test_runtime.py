@@ -33,6 +33,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn(json.dumps(APP),FakeClient.code)
         self.assertIn("state.text.split('\\n')",FakeClient.code)
         self.assertIn('await sky.click',FakeClient.code)
+        self.assertIn('var batch=state.text.match',FakeClient.code)
+        self.assertIn("batch[3]==='5'",FakeClient.code)
         self.assertNotIn('calculator',FakeClient.code)
     def test_no_clicks_cannot_pass(self):
         self.assertEqual(self.run_evidence(dict(doctor_runtime=True,state='passed',phase='read_result',nonce=NONCE,clicks=0))['state'],'failed')
@@ -47,6 +49,15 @@ class RuntimeTests(unittest.TestCase):
         with patch.object(r,'Client',FakeClient), self.assertRaises(ValueError):r.verify_node(Path('/tmp'),"';bad")
     def test_foreign_phase_rejected(self):
         self.assertEqual(self.run_evidence(dict(doctor_runtime=True,state='passed',phase='unknown',nonce=NONCE,clicks=5))['state'],'failed')
+    def test_config_launch_failure_not_presented_as_approval(self):
+        hint=r.stderr_hint('Error: error loading default config: invalid transport token=private-value')
+        self.assertIn('臨時設定',hint);self.assertNotIn('private-value',hint)
+    def test_sqlite_launch_failure_preserved_without_raw_data(self):
+        self.assertIn('資料庫',r.stderr_hint('Error: failed to initialize sqlite state runtime under /private/config'))
+    def test_unknown_error_redacted_by_omission(self):
+        hint=r.stderr_hint('Error: unknown password=private-value')
+        self.assertNotIn('private-value',hint)
+        self.assertIsNone(r.stderr_hint('normal startup'))
 
 class FakeNative:
     wrong_batch=False; wrong_result=False; duplicate=False; fail_click=False
@@ -116,5 +127,18 @@ class NativeTests(unittest.TestCase):
     def test_hosted_node_rejects_unknown_launcher(self):
         with patch.object(r.b,'config_data',return_value={'mcp_servers':{'node_repl':{'command':'unknown'}}}), self.assertRaises(r.RuntimeErrorSafe):
             r.HostedNodeClient(Path('/tmp'))
+    def test_ephemeral_context_does_not_launch_unneeded_mcp(self):
+        config={'mcp_servers':{'node_repl':{},'computer-use':{'enabled':True},'other_server':{'enabled':True}}}
+        with patch.object(r.b,'config_data',return_value=config),patch.object(r,'codex_cli',return_value=Path('/fixture/codex')),patch.object(r.AppServerClient,'_start') as launch:
+            r.AppServerClient(Path('/fixture/config'),require_native=False)
+        arguments=launch.call_args.args[1]
+        self.assertIn('mcp_servers.computer-use.enabled=false',arguments)
+        self.assertIn('mcp_servers.other_server.enabled=false',arguments)
+        self.assertNotIn('mcp_servers.node_repl.enabled=false',arguments)
+        self.assertTrue(config['mcp_servers']['computer-use']['enabled'])
+    def test_unsafe_override_name_not_spawned(self):
+        with patch.object(r.b,'config_data',return_value={'mcp_servers':{'bad.name':{}}}),patch.object(r,'codex_cli',return_value=Path('/fixture/codex')),patch.object(r.AppServerClient,'_start') as launch,self.assertRaises(r.RuntimeErrorSafe):
+            r.AppServerClient(Path('/fixture/config'),require_native=False)
+        launch.assert_not_called()
 
 if __name__=='__main__':unittest.main()
